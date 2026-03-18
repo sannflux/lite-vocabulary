@@ -548,7 +548,7 @@ with tab_gen:
 
             deck_name = st.text_input(
                 "Deck name (use :: for sub-decks)",
-                value="English::Vocabulary",
+                value="-English learning::Vocabulary",
                 key="t3_deck",
             )
 
