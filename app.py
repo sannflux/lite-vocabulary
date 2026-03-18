@@ -1,5 +1,5 @@
 """
-📚 Vocab App — Lightweight Anki Generator
+📚 Vocab App — Lightweight Anki Generator (Google Sheets edition)
 Tabs: Add | Vocabulary | Generate
 Card: Front = Word  |  Back = Translation (ID) + Definition (ID) + IPA + Synonym/Antonym
 Theme: Minimalistic (white, Inter font, indigo accents)
@@ -9,35 +9,80 @@ Batch size: 10 words / request
 
 import streamlit as st
 import pandas as pd
-import io, json, re, time, os, tempfile, hashlib, math
+import json, re, time, os, tempfile, hashlib, math
 import google.generativeai as genai
 import genanki
+import gspread
+from google.oauth2.service_account import Credentials
 from datetime import datetime
-
-try:
-    from github import Github, GithubException
-except ImportError:
-    st.error("Install PyGithub: `pip install PyGithub`")
-    st.stop()
 
 # ─── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="📚 Vocab App", layout="centered", page_icon="📚")
 
 # ─── Secrets ─────────────────────────────────────────────────────────────────
 try:
-    GITHUB_TOKEN   = st.secrets["GITHUB_TOKEN"]
-    REPO_NAME      = st.secrets["REPO_NAME"]
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+    SPREADSHEET_ID = st.secrets["SPREADSHEET_ID"]
+    _GCP_INFO      = st.secrets["gcp_service_account"]
 except KeyError as e:
     st.error(f"Missing secret: {e}. Check your .streamlit/secrets.toml")
     st.stop()
 
-# ─── GitHub ───────────────────────────────────────────────────────────────────
+# ─── Google Sheets connection ─────────────────────────────────────────────────
 @st.cache_resource
-def get_repo():
-    return Github(GITHUB_TOKEN).get_repo(REPO_NAME)
+def get_sheet():
+    creds = Credentials.from_service_account_info(
+        dict(_GCP_INFO),
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ],
+    )
+    client = gspread.authorize(creds)
+    return client.open_by_key(SPREADSHEET_ID).worksheet("vocabulary")
 
-repo = get_repo()
+
+@st.cache_data(ttl=300)
+def load_vocab() -> pd.DataFrame:
+    try:
+        sheet = get_sheet()
+        rows  = sheet.get_all_records(default_blank="")
+    except Exception as e:
+        st.error(f"Could not load sheet: {e}")
+        st.stop()
+
+    if not rows:
+        return pd.DataFrame(columns=["vocab", "phrase", "status"])
+
+    df = pd.DataFrame(rows).astype(str)
+    for col, default in [("vocab", ""), ("phrase", ""), ("status", "New")]:
+        if col not in df.columns:
+            df[col] = default
+        df[col] = df[col].fillna(default).replace("nan", default)
+
+    df = (
+        df[["vocab", "phrase", "status"]]
+        .pipe(lambda d: d[d["vocab"].str.strip().str.len() > 0])
+        .sort_values("vocab", ignore_index=True)
+    )
+    return df
+
+
+def save_vocab(df: pd.DataFrame):
+    """Overwrite the entire sheet with the current DataFrame."""
+    clean = (
+        df[["vocab", "phrase", "status"]]
+        .copy()
+        .pipe(lambda d: d[d["vocab"].astype(str).str.strip().str.len() > 0])
+        .drop_duplicates("vocab", keep="last")
+        .fillna("")
+    )
+    sheet = get_sheet()
+    sheet.clear()
+    data = [clean.columns.tolist()] + clean.astype(str).values.tolist()
+    sheet.update(data, value_input_option="RAW")
+    load_vocab.clear()
+
 
 # ─── Gemini ──────────────────────────────────────────────────────────────────
 @st.cache_resource
@@ -50,45 +95,8 @@ def get_gemini():
 
 gemini = get_gemini()
 
-# ─── Data helpers ─────────────────────────────────────────────────────────────
-@st.cache_data(ttl=300)
-def load_vocab() -> pd.DataFrame:
-    try:
-        f  = repo.get_contents("vocabulary.csv")
-        df = pd.read_csv(io.StringIO(f.decoded_content.decode("utf-8")), dtype=str)
-    except GithubException as e:
-        if e.status == 404:
-            return pd.DataFrame(columns=["vocab", "phrase", "status"])
-        st.error(f"GitHub error: {e}")
-        st.stop()
-    for col, default in [("phrase", ""), ("status", "New")]:
-        if col not in df.columns:
-            df[col] = default
-        df[col] = df[col].fillna(default)
-    return df[["vocab", "phrase", "status"]].sort_values("vocab", ignore_index=True)
-
-
-def save_vocab(df: pd.DataFrame):
-    clean = (
-        df[["vocab", "phrase", "status"]]
-        .copy()
-        .pipe(lambda d: d[d["vocab"].astype(str).str.strip().str.len() > 0])
-        .drop_duplicates("vocab", keep="last")
-    )
-    csv = clean.to_csv(index=False)
-    try:
-        f = repo.get_contents("vocabulary.csv")
-        repo.update_file(f.path, "Update vocab", csv, f.sha)
-    except GithubException as e:
-        if e.status == 404:
-            repo.create_file("vocabulary.csv", "Init vocab", csv)
-        else:
-            raise
-    load_vocab.clear()
-
-
 # ─── AI generation ────────────────────────────────────────────────────────────
-PROMPT = """\
+_PROMPT = """\
 Kamu adalah kamus dwibahasa Inggris-Indonesia. Untuk setiap kata Inggris di bawah,
 kembalikan JSON array (urutan & jumlah sama dengan input).
 
@@ -137,9 +145,11 @@ def generate_cards(vocab_phrase_list: list, batch_size: int = 10) -> list:
     status   = st.empty()
 
     for idx, batch in enumerate(batches):
-        status.info(f"⏳ Batch {idx + 1} / {len(batches)} — {', '.join(v[0] for v in batch)}")
+        words = ", ".join(v[0] for v in batch)
+        status.info(f"⏳ Batch {idx + 1} / {len(batches)} — {words}")
+
         batch_dicts = [{"vocab": v[0], "phrase": v[1]} for v in batch]
-        prompt      = PROMPT.format(batch=json.dumps(batch_dicts, ensure_ascii=False))
+        prompt      = _PROMPT.format(batch=json.dumps(batch_dicts, ensure_ascii=False))
         success     = False
 
         for attempt in range(3):
@@ -157,21 +167,25 @@ def generate_cards(vocab_phrase_list: list, batch_size: int = 10) -> list:
         if not success:
             for item in batch_dicts:
                 all_data.append({
-                    "vocab": item["vocab"], "translation": "—",
-                    "definition_id": "", "part_of_speech": "",
-                    "pronunciation_ipa": "", "synonym": "", "antonym": "",
+                    "vocab": item["vocab"],
+                    "translation": "—",
+                    "definition_id": "",
+                    "part_of_speech": "",
+                    "pronunciation_ipa": "",
+                    "synonym": "",
+                    "antonym": "",
                 })
 
         prog.progress((idx + 1) / len(batches))
         if idx < len(batches) - 1:
-            time.sleep(1)  # gentle rate-limit buffer
+            time.sleep(1)
 
     prog.empty()
     status.empty()
     return all_data
 
 
-# ─── Anki card theme (Minimalistic) ──────────────────────────────────────────
+# ─── Anki card CSS & templates (Minimalistic) ────────────────────────────────
 _CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -226,7 +240,7 @@ hr {
     justify-content: center;
     gap: 48px;
     flex-wrap: wrap;
-    margin-top: 2px;
+    margin-top: 14px;
 }
 .pill-label {
     font-size: 0.6em;
@@ -258,7 +272,6 @@ _BACK = """
   {{#DefinitionID}}<div class="definition">{{DefinitionID}}</div>{{/DefinitionID}}
   {{#Pronunciation}}<div class="ipa">{{Pronunciation}}</div>{{/Pronunciation}}
   {{#Synonym}}
-  <hr>
   <div class="syn-row">
     <div>
       <div class="pill-label">Sinonim</div>
@@ -337,9 +350,9 @@ new_ct  = int((df["status"] == "New").sum())
 done_ct = int((df["status"] == "Done").sum())
 
 m1, m2, m3 = st.columns(3)
-m1.metric("Total",  total)
-m2.metric("New ✨",  new_ct)
-m3.metric("Done ✅", done_ct)
+m1.metric("Total",   total)
+m2.metric("New ✨",   new_ct)
+m3.metric("Done ✅",  done_ct)
 
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
 tab_add, tab_vocab, tab_gen = st.tabs([
@@ -390,7 +403,7 @@ with tab_add:
     )
 
     if st.button("➕ Add All", use_container_width=True):
-        added, skipped = 0, 0
+        added, skipped, new_rows = 0, 0, []
         for line in bulk_text.strip().splitlines():
             parts = line.strip().split(",", 1)
             v = parts[0].strip().lower()
@@ -400,13 +413,13 @@ with tab_add:
             if (st.session_state.vocab_df["vocab"] == v).any():
                 skipped += 1
                 continue
-            row = pd.DataFrame([{"vocab": v, "phrase": p, "status": "New"}])
-            st.session_state.vocab_df = pd.concat(
-                [st.session_state.vocab_df, row], ignore_index=True
-            )
+            new_rows.append({"vocab": v, "phrase": p, "status": "New"})
             added += 1
 
         if added:
+            st.session_state.vocab_df = pd.concat(
+                [st.session_state.vocab_df, pd.DataFrame(new_rows)], ignore_index=True
+            )
             save_vocab(st.session_state.vocab_df)
             msg = f"✅ Added {added} word(s)."
             if skipped:
@@ -445,23 +458,24 @@ with tab_vocab:
 
     if col_save.button("💾 Save Changes", type="primary", use_container_width=True):
         full = st.session_state.vocab_df.copy()
-        # Update rows that were shown
         common = [i for i in edited_df.index if i in full.index]
         if common:
             full.loc[common, ["vocab", "phrase", "status"]] = (
                 edited_df.loc[common, ["vocab", "phrase", "status"]].values
             )
-        # New rows added inside the editor
         new_idx = [i for i in edited_df.index if i not in full.index]
         if new_idx:
-            full = pd.concat([full, edited_df.loc[new_idx, ["vocab", "phrase", "status"]]], ignore_index=True)
-        # Deleted rows
+            full = pd.concat(
+                [full, edited_df.loc[new_idx, ["vocab", "phrase", "status"]]],
+                ignore_index=True,
+            )
         removed = [i for i in show_df.index if i not in edited_df.index]
         if removed:
             full = full.drop(index=removed).reset_index(drop=True)
+
         st.session_state.vocab_df = full
         save_vocab(full)
-        st.toast("✅ Saved!")
+        st.toast("✅ Saved to Google Sheets!")
         st.rerun()
 
     if col_reset.button("🔄 Reset All to New", use_container_width=True):
@@ -470,12 +484,21 @@ with tab_vocab:
         st.toast("🔄 All reset to New!")
         st.rerun()
 
+    st.divider()
+    st.download_button(
+        "💾 Download backup CSV",
+        data=st.session_state.vocab_df.to_csv(index=False).encode("utf-8"),
+        file_name=f"vocab_backup_{datetime.now().strftime('%Y%m%d')}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
 # ══════════════════════════════════════════════════════════════
 #  TAB 3 — GENERATE
 # ══════════════════════════════════════════════════════════════
 with tab_gen:
 
-    # ── If deck is ready, show download ──────────────────────
+    # ── Deck ready — show download ────────────────────────────
     if st.session_state.apkg_bytes is not None:
         st.success(f"✅ Deck ready — {len(st.session_state.preview_notes)} cards!")
 
@@ -493,15 +516,16 @@ with tab_gen:
                     c1, c2 = st.columns([1, 2])
                     with c1:
                         st.markdown(
-                            f"**{note.get('vocab','?')}**  \n"
-                            f"_{note.get('pronunciation_ipa','')}_  \n"
-                            f"*{note.get('part_of_speech','')}*"
+                            f"**{note.get('vocab', '?')}**  \n"
+                            f"_{note.get('pronunciation_ipa', '')}_  \n"
+                            f"*{note.get('part_of_speech', '')}*"
                         )
                     with c2:
+                        ant = note.get("antonym", "") or "—"
                         st.markdown(
-                            f"🇮🇩 **{note.get('translation','—')}**  \n"
-                            f"{note.get('definition_id','')}  \n"
-                            f"Syn: _{note.get('synonym','—')}_ &nbsp;·&nbsp; Ant: _{note.get('antonym','—') or '—'}_"
+                            f"🇮🇩 **{note.get('translation', '—')}**  \n"
+                            f"{note.get('definition_id', '')}  \n"
+                            f"Syn: _{note.get('synonym', '—')}_ &nbsp;·&nbsp; Ant: _{ant}_"
                         )
                     st.divider()
 
@@ -510,14 +534,18 @@ with tab_gen:
             st.session_state.preview_notes = []
             st.rerun()
 
-    # ── Otherwise show generation form ───────────────────────
+    # ── Generation form ───────────────────────────────────────
     else:
         new_df = st.session_state.vocab_df[st.session_state.vocab_df["status"] == "New"].copy()
 
         if new_df.empty:
-            st.warning("No 'New' words to generate. Add words in the **Add** tab, or reset statuses in **Vocabulary**.")
+            st.warning(
+                "No 'New' words to generate. "
+                "Add words in the **Add** tab, or reset statuses in **Vocabulary**."
+            )
         else:
             st.subheader("Generate Anki Deck")
+
             deck_name = st.text_input(
                 "Deck name (use :: for sub-decks)",
                 value="English::Vocabulary",
@@ -562,7 +590,6 @@ with tab_gen:
                         with st.spinner("📦 Packing .apkg…"):
                             apkg_data = create_apkg(notes, clean_name, deck_id)
 
-                        # Mark generated words as Done
                         done_vocabs = {n["vocab"] for n in notes}
                         st.session_state.vocab_df.loc[
                             st.session_state.vocab_df["vocab"].isin(done_vocabs), "status"
@@ -576,4 +603,3 @@ with tab_gen:
                         st.error("❌ Generation failed. Check your Gemini API key and quota.")
             else:
                 st.warning("Select at least one word.")
-
