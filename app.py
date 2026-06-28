@@ -1,7 +1,7 @@
 """
 📚 Vocab App — Lightweight Anki Generator (Google Sheets edition)
 Tabs: Add | Vocabulary | Generate
-Card: Front = Word  |  Back = Translation (ID) + Definition (ID) + IPA + Synonym/Antonym
+Card: Front = Phrase (vocab highlighted) | Back = Phrase + POS + IPA + Translation + Def + Syn/Ant
 Theme: Minimalistic (white, Inter font, indigo accents)
 Audio: disabled
 Batch size: 10 words / request
@@ -157,6 +157,11 @@ def generate_cards(vocab_phrase_list: list, batch_size: int = 10) -> list:
                 resp   = gemini.generate_content(prompt)
                 parsed = _parse_json(resp.text)
                 if isinstance(parsed, list) and parsed:
+                    # Attach original phrase back to each parsed item
+                    phrase_map = {item["vocab"]: item["phrase"] for item in batch_dicts}
+                    for item in parsed:
+                        if "phrase" not in item or not item["phrase"]:
+                            item["phrase"] = phrase_map.get(item.get("vocab", ""), "")
                     all_data.extend(parsed)
                     success = True
                     break
@@ -168,6 +173,7 @@ def generate_cards(vocab_phrase_list: list, batch_size: int = 10) -> list:
             for item in batch_dicts:
                 all_data.append({
                     "vocab": item["vocab"],
+                    "phrase": item["phrase"],
                     "translation": "—",
                     "definition_id": "",
                     "part_of_speech": "",
@@ -185,7 +191,7 @@ def generate_cards(vocab_phrase_list: list, batch_size: int = 10) -> list:
     return all_data
 
 
-# ─── Anki card CSS & templates (Minimalistic) ────────────────────────────────
+# ─── Anki card CSS & templates ────────────────────────────────────────────────
 _CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -199,6 +205,20 @@ _CSS = """
     max-width: 500px;
     margin: 0 auto;
 }
+/* Front & Back: example sentence */
+.sentence {
+    font-size: 1.6em;
+    font-weight: 500;
+    color: #1e293b;
+    line-height: 1.5;
+    margin-bottom: 8px;
+}
+/* Vocab word highlighted in sentence */
+.highlight {
+    color: #f59e0b;
+    font-weight: 700;
+}
+/* Fallback: no phrase */
 .word {
     font-size: 2.5em;
     font-weight: 700;
@@ -206,17 +226,28 @@ _CSS = """
     letter-spacing: -0.025em;
     margin-bottom: 6px;
 }
-.pos {
-    font-size: 0.68em;
-    font-weight: 600;
-    color: #94a3b8;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-}
 hr {
     border: none;
-    border-top: 1.5px solid #f1f5f9;
+    border-top: 2px dashed #94a3b8;
     margin: 22px 0;
+}
+/* POS + IPA on same row */
+.meta-row {
+    display: flex;
+    justify-content: center;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 16px;
+}
+.pos {
+    font-size: 0.95em;
+    font-weight: 700;
+    color: #4f46e5;
+}
+.ipa {
+    font-family: 'Courier New', monospace;
+    font-size: 0.9em;
+    color: #94a3b8;
 }
 .translation {
     font-size: 1.9em;
@@ -229,11 +260,6 @@ hr {
     color: #64748b;
     font-style: italic;
     margin-bottom: 10px;
-}
-.ipa {
-    font-family: 'Courier New', monospace;
-    font-size: 0.85em;
-    color: #94a3b8;
 }
 .syn-row {
     display: flex;
@@ -256,21 +282,35 @@ hr {
 }
 """
 
+# FRONT: show phrase with vocab highlighted; fallback to plain word
 _FRONT = """
 <div class="card">
-  <div class="word">{{Word}}</div>
-  {{#PartOfSpeech}}<div class="pos">{{PartOfSpeech}}</div>{{/PartOfSpeech}}
+  {{#Phrase}}
+    <div class="sentence">{{Phrase}}</div>
+  {{/Phrase}}
+  {{^Phrase}}
+    <div class="word">{{Word}}</div>
+    {{#PartOfSpeech}}<div class="pos">{{PartOfSpeech}}</div>{{/PartOfSpeech}}
+  {{/Phrase}}
 </div>
 """
 
+# BACK: repeat phrase (or word), dashed divider, POS + IPA, translation, definition, syn/ant
 _BACK = """
 <div class="card">
-  <div class="word">{{Word}}</div>
-  {{#PartOfSpeech}}<div class="pos">{{PartOfSpeech}}</div>{{/PartOfSpeech}}
+  {{#Phrase}}
+    <div class="sentence">{{Phrase}}</div>
+  {{/Phrase}}
+  {{^Phrase}}
+    <div class="word">{{Word}}</div>
+  {{/Phrase}}
   <hr>
+  <div class="meta-row">
+    {{#PartOfSpeech}}<span class="pos">{{PartOfSpeech}}.</span>{{/PartOfSpeech}}
+    {{#Pronunciation}}<span class="ipa">{{Pronunciation}}</span>{{/Pronunciation}}
+  </div>
   <div class="translation">{{Translation}}</div>
   {{#DefinitionID}}<div class="definition">{{DefinitionID}}</div>{{/DefinitionID}}
-  {{#Pronunciation}}<div class="ipa">{{Pronunciation}}</div>{{/Pronunciation}}
   {{#Synonym}}
   <div class="syn-row">
     <div>
@@ -290,11 +330,11 @@ _BACK = """
 
 
 def create_apkg(notes: list, deck_name: str, deck_id: int) -> bytes:
-    model_id = int(hashlib.md5(("MinimalVocab_v1_" + deck_name).encode()).hexdigest(), 16) % (1 << 31)
+    model_id = int(hashlib.md5(("MinimalVocab_v2_" + deck_name).encode()).hexdigest(), 16) % (1 << 31)
 
     my_model = genanki.Model(
         model_id,
-        "Minimal Vocab v1",
+        "Minimal Vocab v2",
         fields=[
             {"name": "Word"},
             {"name": "Translation"},
@@ -303,6 +343,7 @@ def create_apkg(notes: list, deck_name: str, deck_id: int) -> bytes:
             {"name": "PartOfSpeech"},
             {"name": "Synonym"},
             {"name": "Antonym"},
+            {"name": "Phrase"},       # ← NEW: example sentence with highlight
         ],
         templates=[{"name": "Recognition", "qfmt": _FRONT, "afmt": _BACK}],
         css=_CSS,
@@ -314,6 +355,18 @@ def create_apkg(notes: list, deck_name: str, deck_id: int) -> bytes:
         vocab = str(note.get("vocab", "")).strip()
         if not vocab:
             continue
+
+        # Bold + highlight the vocab word inside the example sentence
+        raw_phrase = str(note.get("phrase", "")).strip()
+        if raw_phrase:
+            phrase_html = re.sub(
+                rf'(?i)\b({re.escape(vocab)})\b',
+                r'<b class="highlight">\1</b>',
+                raw_phrase,
+            )
+        else:
+            phrase_html = ""
+
         guid = str(int(hashlib.sha256((vocab + deck_name).encode()).hexdigest(), 16) % (10 ** 10))
         my_deck.add_note(genanki.Note(
             model=my_model,
@@ -326,6 +379,7 @@ def create_apkg(notes: list, deck_name: str, deck_id: int) -> bytes:
                 str(note.get("part_of_speech", "")),
                 str(note.get("synonym", "")),
                 str(note.get("antonym", "")),
+                phrase_html,
             ],
         ))
 
