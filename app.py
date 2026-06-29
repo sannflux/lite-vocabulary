@@ -180,10 +180,10 @@ def generate_cards(vocab_phrase_list: list, batch_size: int = 10) -> list:
 
 # ─── Build HTML card sides ────────────────────────────────────────────────────
 def _bold_vocab(phrase: str, vocab: str) -> str:
-    """Wrap vocab word in phrase with bold orange styling."""
+    """Wrap vocab word in phrase with <b> tag only, no style."""
     return re.sub(
         rf'(?i)\b({re.escape(vocab)})\b',
-        r'<b style="color:#f59e0b;font-weight:700">\1</b>',
+        r'<b>\1</b>',
         phrase,
     )
 
@@ -191,48 +191,24 @@ def _bold_vocab(phrase: str, vocab: str) -> str:
 def build_front(note: dict) -> str:
     vocab  = note.get("vocab", "").strip()
     phrase = note.get("phrase", "").strip()
-
-    sentence = _bold_vocab(phrase, vocab) if phrase else f'<b style="color:#f59e0b;font-weight:700">{vocab}</b>'
-
-    return (
-        '<div style="font-family:monospace;font-size:1.4em;'
-        'font-weight:500;text-align:center;line-height:1.6">'
-        f'{sentence}</div>'
-    )
+    return _bold_vocab(phrase, vocab) if phrase else f"<b>{vocab}</b>"
 
 
 def build_back(note: dict) -> str:
     vocab     = note.get("vocab", "").strip()
-    phrase    = note.get("phrase", "").strip()
     pos       = note.get("part_of_speech", "").strip()
     ipa       = note.get("pronunciation_ipa", "").strip()
     phrase_id = note.get("phrase_id", "").strip()
 
-    sentence = _bold_vocab(phrase, vocab) if phrase else f'<b style="color:#f59e0b;font-weight:700">{vocab}</b>'
+    meta = f"{pos}. {ipa}" if pos and ipa else pos or ipa
 
-    sentence_html = (
-        '<div style="font-family:monospace;font-size:1.4em;'
-        'font-weight:500;text-align:center;line-height:1.6">'
-        f'{sentence}</div>'
-    )
+    parts = [f"<b>{vocab}</b>"]
+    if meta:
+        parts.append(meta)
+    if phrase_id:
+        parts.append(f"<br>{phrase_id}")
 
-    meta_parts = []
-    if pos:
-        meta_parts.append(f'<b style="color:#4f46e5">{pos}.</b>')
-    if ipa:
-        meta_parts.append(f'<span style="font-family:monospace;color:#94a3b8">{ipa}</span>')
-    meta_html = (
-        f'<div style="text-align:center;margin-bottom:14px">{" ".join(meta_parts)}</div>'
-        if meta_parts else ""
-    )
-
-    phrase_id_html = (
-        '<div style="font-family:monospace;font-size:1.4em;font-weight:700;'
-        f'color:#4f46e5;text-align:center;line-height:1.5">{phrase_id}</div>'
-        if phrase_id else ""
-    )
-
-    return sentence_html + meta_html + phrase_id_html
+    return "<br>".join(parts)
 
 
 # ─── Create Anki tab-separated CSV ───────────────────────────────────────────
