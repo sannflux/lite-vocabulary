@@ -1,17 +1,15 @@
 """
-📚 Vocab App — Lightweight Anki Generator (Google Sheets edition)
+📚 Vocab App — Anki CSV Generator (Google Sheets edition)
 Tabs: Add | Vocabulary | Generate
-Card: Front = Phrase (vocab highlighted) | Back = Phrase + POS + IPA + Translation + Def + Syn/Ant
-Theme: Minimalistic (white, Inter font, indigo accents)
-Audio: disabled
-Batch size: 10 words / request
+Card: Front = Phrase (vocab bolded orange)
+      Back  = Phrase + dashed hr + POS + IPA + Indonesian sentence translation
+Output: Tab-separated .txt for Anki basic import
 """
 
 import streamlit as st
 import pandas as pd
-import json, re, time, os, tempfile, hashlib, math
+import json, re, time, io, math
 import google.generativeai as genai
-import genanki
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
@@ -28,7 +26,7 @@ except KeyError as e:
     st.error(f"Missing secret: {e}. Check your .streamlit/secrets.toml")
     st.stop()
 
-# ─── Google Sheets connection ─────────────────────────────────────────────────
+# ─── Google Sheets ────────────────────────────────────────────────────────────
 @st.cache_resource
 def get_sheet():
     creds = Credentials.from_service_account_info(
@@ -69,7 +67,6 @@ def load_vocab() -> pd.DataFrame:
 
 
 def save_vocab(df: pd.DataFrame):
-    """Overwrite the entire sheet with the current DataFrame."""
     clean = (
         df[["vocab", "phrase", "status"]]
         .copy()
@@ -95,29 +92,24 @@ def get_gemini():
 
 gemini = get_gemini()
 
-# ─── AI generation ────────────────────────────────────────────────────────────
+# ─── AI Prompt ───────────────────────────────────────────────────────────────
 _PROMPT = """\
-Kamu adalah kamus dwibahasa Inggris-Indonesia. Untuk setiap kata Inggris di bawah,
+Kamu adalah kamus dwibahasa Inggris-Indonesia. Untuk setiap item di bawah,
 kembalikan JSON array (urutan & jumlah sama dengan input).
 
 FORMAT OUTPUT:
 [
   {{
     "vocab": "sama seperti input",
-    "translation": "terjemahan Indonesia, 1-3 kata saja (bukan kalimat)",
-    "definition_id": "Definisi singkat bahasa Indonesia, maks 12 kata.",
     "part_of_speech": "Noun / Verb / Adjective / Adverb",
     "pronunciation_ipa": "/notasi IPA/",
-    "synonym": "satu sinonim Inggris yang paling umum",
-    "antonym": "satu antonim Inggris yang paling umum, atau string kosong jika tidak ada"
+    "phrase_id": "Terjemahan kalimat 'phrase' ke Bahasa Indonesia. Jika phrase kosong, buat kalimat contoh singkat lalu terjemahkan."
   }}
 ]
 
 ATURAN WAJIB:
-- translation  : HANYA kata/frasa Indonesia, BUKAN kalimat penuh
-- definition_id: definisi pendek Bahasa Indonesia, maks 12 kata
-- synonym      : TEPAT satu sinonim saja
-- antonym      : tepat satu antonim, atau "" jika memang tidak ada
+- phrase_id : terjemahan kalimat contoh ke Bahasa Indonesia, BUKAN terjemahan kata
+- Jika field phrase kosong, buatkan kalimat contoh sendiri lalu terjemahkan
 - Output HANYA array JSON, tanpa teks tambahan apapun
 
 INPUT:
@@ -157,11 +149,9 @@ def generate_cards(vocab_phrase_list: list, batch_size: int = 10) -> list:
                 resp   = gemini.generate_content(prompt)
                 parsed = _parse_json(resp.text)
                 if isinstance(parsed, list) and parsed:
-                    # Attach original phrase back to each parsed item
                     phrase_map = {item["vocab"]: item["phrase"] for item in batch_dicts}
                     for item in parsed:
-                        if "phrase" not in item or not item["phrase"]:
-                            item["phrase"] = phrase_map.get(item.get("vocab", ""), "")
+                        item["phrase"] = phrase_map.get(item.get("vocab", ""), "")
                     all_data.extend(parsed)
                     success = True
                     break
@@ -174,12 +164,9 @@ def generate_cards(vocab_phrase_list: list, batch_size: int = 10) -> list:
                 all_data.append({
                     "vocab": item["vocab"],
                     "phrase": item["phrase"],
-                    "translation": "—",
-                    "definition_id": "",
                     "part_of_speech": "",
                     "pronunciation_ipa": "",
-                    "synonym": "",
-                    "antonym": "",
+                    "phrase_id": "",
                 })
 
         prog.progress((idx + 1) / len(batches))
@@ -191,208 +178,76 @@ def generate_cards(vocab_phrase_list: list, batch_size: int = 10) -> list:
     return all_data
 
 
-# ─── Anki card CSS & templates ────────────────────────────────────────────────
-_CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-* { box-sizing: border-box; margin: 0; padding: 0; }
-.card {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-    background: #ffffff;
-    color: #1e293b;
-    padding: 36px 28px 32px;
-    text-align: center;
-    line-height: 1.6;
-    max-width: 500px;
-    margin: 0 auto;
-}
-/* Front & Back: example sentence */
-.sentence {
-    font-size: 1.6em;
-    font-weight: 500;
-    color: #1e293b;
-    line-height: 1.5;
-    margin-bottom: 8px;
-}
-/* Vocab word highlighted in sentence */
-.highlight {
-    color: #f59e0b;
-    font-weight: 700;
-}
-/* Fallback: no phrase */
-.word {
-    font-size: 2.5em;
-    font-weight: 700;
-    color: #0f172a;
-    letter-spacing: -0.025em;
-    margin-bottom: 6px;
-}
-hr {
-    border: none;
-    border-top: 2px dashed #94a3b8;
-    margin: 22px 0;
-}
-/* POS + IPA on same row */
-.meta-row {
-    display: flex;
-    justify-content: center;
-    align-items: baseline;
-    gap: 10px;
-    margin-bottom: 16px;
-}
-.pos {
-    font-size: 0.95em;
-    font-weight: 700;
-    color: #4f46e5;
-}
-.ipa {
-    font-family: 'Courier New', monospace;
-    font-size: 0.9em;
-    color: #94a3b8;
-}
-.translation {
-    font-size: 1.9em;
-    font-weight: 700;
-    color: #4f46e5;
-    margin-bottom: 6px;
-}
-.definition {
-    font-size: 0.9em;
-    color: #64748b;
-    font-style: italic;
-    margin-bottom: 10px;
-}
-.syn-row {
-    display: flex;
-    justify-content: center;
-    gap: 48px;
-    flex-wrap: wrap;
-    margin-top: 14px;
-}
-.pill-label {
-    font-size: 0.6em;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    color: #cbd5e1;
-    margin-bottom: 3px;
-}
-.pill-val {
-    font-size: 0.88em;
-    color: #475569;
-}
-"""
-
-# FRONT: show phrase with vocab highlighted; fallback to plain word
-_FRONT = """
-<div class="card">
-  {{#Phrase}}
-    <div class="sentence">{{Phrase}}</div>
-  {{/Phrase}}
-  {{^Phrase}}
-    <div class="word">{{Word}}</div>
-    {{#PartOfSpeech}}<div class="pos">{{PartOfSpeech}}</div>{{/PartOfSpeech}}
-  {{/Phrase}}
-</div>
-"""
-
-# BACK: repeat phrase (or word), dashed divider, POS + IPA, translation, definition, syn/ant
-_BACK = """
-<div class="card">
-  {{#Phrase}}
-    <div class="sentence">{{Phrase}}</div>
-  {{/Phrase}}
-  {{^Phrase}}
-    <div class="word">{{Word}}</div>
-  {{/Phrase}}
-  <hr>
-  <div class="meta-row">
-    {{#PartOfSpeech}}<span class="pos">{{PartOfSpeech}}.</span>{{/PartOfSpeech}}
-    {{#Pronunciation}}<span class="ipa">{{Pronunciation}}</span>{{/Pronunciation}}
-  </div>
-  <div class="translation">{{Translation}}</div>
-  {{#DefinitionID}}<div class="definition">{{DefinitionID}}</div>{{/DefinitionID}}
-  {{#Synonym}}
-  <div class="syn-row">
-    <div>
-      <div class="pill-label">Sinonim</div>
-      <div class="pill-val">{{Synonym}}</div>
-    </div>
-    {{#Antonym}}
-    <div>
-      <div class="pill-label">Antonim</div>
-      <div class="pill-val">{{Antonym}}</div>
-    </div>
-    {{/Antonym}}
-  </div>
-  {{/Synonym}}
-</div>
-"""
-
-
-def create_apkg(notes: list, deck_name: str, deck_id: int) -> bytes:
-    model_id = int(hashlib.md5(("MinimalVocab_v2_" + deck_name).encode()).hexdigest(), 16) % (1 << 31)
-
-    my_model = genanki.Model(
-        model_id,
-        "Minimal Vocab v2",
-        fields=[
-            {"name": "Word"},
-            {"name": "Translation"},
-            {"name": "DefinitionID"},
-            {"name": "Pronunciation"},
-            {"name": "PartOfSpeech"},
-            {"name": "Synonym"},
-            {"name": "Antonym"},
-            {"name": "Phrase"},       # ← NEW: example sentence with highlight
-        ],
-        templates=[{"name": "Recognition", "qfmt": _FRONT, "afmt": _BACK}],
-        css=_CSS,
+# ─── Build HTML card sides ────────────────────────────────────────────────────
+def _bold_vocab(phrase: str, vocab: str) -> str:
+    """Wrap vocab word in phrase with bold orange styling."""
+    return re.sub(
+        rf'(?i)\b({re.escape(vocab)})\b',
+        r'<b style="color:#f59e0b;font-weight:700">\1</b>',
+        phrase,
     )
 
-    my_deck = genanki.Deck(deck_id, deck_name)
 
+def build_front(note: dict) -> str:
+    vocab  = note.get("vocab", "").strip()
+    phrase = note.get("phrase", "").strip()
+
+    sentence = _bold_vocab(phrase, vocab) if phrase else f'<b style="color:#f59e0b;font-weight:700">{vocab}</b>'
+
+    return (
+        '<div style="font-family:monospace;font-size:1.4em;'
+        'font-weight:500;text-align:center;line-height:1.6">'
+        f'{sentence}</div>'
+    )
+
+
+def build_back(note: dict) -> str:
+    vocab     = note.get("vocab", "").strip()
+    phrase    = note.get("phrase", "").strip()
+    pos       = note.get("part_of_speech", "").strip()
+    ipa       = note.get("pronunciation_ipa", "").strip()
+    phrase_id = note.get("phrase_id", "").strip()
+
+    sentence = _bold_vocab(phrase, vocab) if phrase else f'<b style="color:#f59e0b;font-weight:700">{vocab}</b>'
+
+    sentence_html = (
+        '<div style="font-family:monospace;font-size:1.4em;'
+        'font-weight:500;text-align:center;line-height:1.6">'
+        f'{sentence}</div>'
+    )
+
+    meta_parts = []
+    if pos:
+        meta_parts.append(f'<b style="color:#4f46e5">{pos}.</b>')
+    if ipa:
+        meta_parts.append(f'<span style="font-family:monospace;color:#94a3b8">{ipa}</span>')
+    meta_html = (
+        f'<div style="text-align:center;margin-bottom:14px">{" ".join(meta_parts)}</div>'
+        if meta_parts else ""
+    )
+
+    phrase_id_html = (
+        '<div style="font-family:monospace;font-size:1.4em;font-weight:700;'
+        f'color:#4f46e5;text-align:center;line-height:1.5">{phrase_id}</div>'
+        if phrase_id else ""
+    )
+
+    return sentence_html + meta_html + phrase_id_html
+
+
+# ─── Create Anki tab-separated CSV ───────────────────────────────────────────
+def create_anki_csv(notes: list) -> bytes:
+    lines = ["#separator:tab", "#html:true", "#columns:Front\tBack"]
     for note in notes:
-        vocab = str(note.get("vocab", "")).strip()
-        if not vocab:
-            continue
-
-        # Bold + highlight the vocab word inside the example sentence
-        raw_phrase = str(note.get("phrase", "")).strip()
-        if raw_phrase:
-            phrase_html = re.sub(
-                rf'(?i)\b({re.escape(vocab)})\b',
-                r'<b class="highlight">\1</b>',
-                raw_phrase,
-            )
-        else:
-            phrase_html = ""
-
-        guid = str(int(hashlib.sha256((vocab + deck_name).encode()).hexdigest(), 16) % (10 ** 10))
-        my_deck.add_note(genanki.Note(
-            model=my_model,
-            guid=guid,
-            fields=[
-                vocab,
-                str(note.get("translation", "")),
-                str(note.get("definition_id", "")),
-                str(note.get("pronunciation_ipa", "")),
-                str(note.get("part_of_speech", "")),
-                str(note.get("synonym", "")),
-                str(note.get("antonym", "")),
-                phrase_html,
-            ],
-        ))
-
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "deck.apkg")
-        genanki.Package(my_deck).write_to_file(path)
-        with open(path, "rb") as f:
-            return f.read()
+        front = build_front(note).replace("\n", "").replace("\t", " ")
+        back  = build_back(note).replace("\n", "").replace("\t", " ")
+        lines.append(f"{front}\t{back}")
+    return "\n".join(lines).encode("utf-8")
 
 
 # ─── Session state ────────────────────────────────────────────────────────────
 st.session_state.setdefault("vocab_df",      load_vocab().copy())
-st.session_state.setdefault("apkg_bytes",    None)
+st.session_state.setdefault("csv_bytes",     None)
 st.session_state.setdefault("preview_notes", [])
 
 # ─── Header ───────────────────────────────────────────────────────────────────
@@ -404,9 +259,9 @@ new_ct  = int((df["status"] == "New").sum())
 done_ct = int((df["status"] == "Done").sum())
 
 m1, m2, m3 = st.columns(3)
-m1.metric("Total",   total)
-m2.metric("New ✨",   new_ct)
-m3.metric("Done ✅",  done_ct)
+m1.metric("Total",  total)
+m2.metric("New ✨",  new_ct)
+m3.metric("Done ✅", done_ct)
 
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
 tab_add, tab_vocab, tab_gen = st.tabs([
@@ -421,10 +276,10 @@ tab_add, tab_vocab, tab_gen = st.tabs([
 with tab_add:
     st.subheader("Add a word")
 
-    v_in = st.text_input("Word", placeholder="e.g. serendipity", key="t1_vocab")
+    v_in = st.text_input("Word", placeholder="e.g. submersible", key="t1_vocab")
     p_in = st.text_input(
         "Example sentence (optional)",
-        placeholder="She found the café by serendipity.",
+        placeholder="A submersible can explore the deep ocean floor.",
         key="t1_phrase",
     )
 
@@ -446,12 +301,12 @@ with tab_add:
 
     st.divider()
     st.subheader("Bulk add")
-    st.caption("One word per line. Or: `word, example sentence`")
+    st.caption("Satu kata per baris. Atau: `kata, kalimat contoh`")
 
     bulk_text = st.text_area(
         "Words",
         height=150,
-        placeholder="apple\nserendipity, She found it by serendipity.\nephemeral",
+        placeholder="apple\nsubmersible, A submersible can explore the deep ocean floor.\nephemeral",
         key="t1_bulk",
         label_visibility="collapsed",
     )
@@ -552,61 +407,49 @@ with tab_vocab:
 # ══════════════════════════════════════════════════════════════
 with tab_gen:
 
-    # ── Deck ready — show download ────────────────────────────
-    if st.session_state.apkg_bytes is not None:
-        st.success(f"✅ Deck ready — {len(st.session_state.preview_notes)} cards!")
+    if st.session_state.csv_bytes is not None:
+        st.success(f"✅ {len(st.session_state.preview_notes)} cards ready!")
 
         st.download_button(
-            "📥 Download .apkg",
-            data=st.session_state.apkg_bytes,
-            file_name=f"vocab_{datetime.now().strftime('%Y%m%d_%H%M')}.apkg",
-            mime="application/octet-stream",
+            "📥 Download Anki CSV (.txt)",
+            data=st.session_state.csv_bytes,
+            file_name=f"vocab_anki_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+            mime="text/plain",
             use_container_width=True,
         )
 
+        st.caption("Import di Anki: **File → Import** → pilih file ini → separator = **Tab**, centang **Allow HTML**")
+
         if st.session_state.preview_notes:
-            with st.expander("👁️ Card preview (first 5)", expanded=True):
+            with st.expander("👁️ Preview kartu (5 pertama)", expanded=True):
                 for note in st.session_state.preview_notes[:5]:
-                    c1, c2 = st.columns([1, 2])
-                    with c1:
-                        st.markdown(
-                            f"**{note.get('vocab', '?')}**  \n"
-                            f"_{note.get('pronunciation_ipa', '')}_  \n"
-                            f"*{note.get('part_of_speech', '')}*"
-                        )
-                    with c2:
-                        ant = note.get("antonym", "") or "—"
-                        st.markdown(
-                            f"🇮🇩 **{note.get('translation', '—')}**  \n"
-                            f"{note.get('definition_id', '')}  \n"
-                            f"Syn: _{note.get('synonym', '—')}_ &nbsp;·&nbsp; Ant: _{ant}_"
-                        )
+                    vocab     = note.get("vocab", "?")
+                    phrase    = note.get("phrase", "")
+                    pos       = note.get("part_of_speech", "")
+                    ipa       = note.get("pronunciation_ipa", "")
+                    phrase_id = note.get("phrase_id", "—")
+
+                    st.markdown(f"**Front:** {phrase or vocab}")
+                    st.markdown(f"**Back:** *(kalimat sama)* → `{pos}` {ipa}  \n🇮🇩 _{phrase_id}_")
                     st.divider()
 
-        if st.button("🔄 Generate another deck", use_container_width=True):
-            st.session_state.apkg_bytes    = None
+        if st.button("🔄 Generate lagi", use_container_width=True):
+            st.session_state.csv_bytes     = None
             st.session_state.preview_notes = []
             st.rerun()
 
-    # ── Generation form ───────────────────────────────────────
     else:
         new_df = st.session_state.vocab_df[st.session_state.vocab_df["status"] == "New"].copy()
 
         if new_df.empty:
             st.warning(
-                "No 'New' words to generate. "
-                "Add words in the **Add** tab, or reset statuses in **Vocabulary**."
+                "Tidak ada kata 'New'. "
+                "Tambah di tab **Add**, atau reset status di **Vocabulary**."
             )
         else:
-            st.subheader("Generate Anki Deck")
+            st.subheader("Generate Anki CSV")
 
-            deck_name = st.text_input(
-                "Deck name (use :: for sub-decks)",
-                value="-English learning::Vocabulary",
-                key="t3_deck",
-            )
-
-            st.write("**Select words to export:**")
+            st.write("**Pilih kata yang mau di-export:**")
             sel_df = new_df[["vocab", "phrase"]].copy()
             sel_df.insert(0, "Export", True)
 
@@ -626,23 +469,14 @@ with tab_gen:
             n_batch  = math.ceil(n / 10) if n > 0 else 0
 
             if n > 0:
-                st.info(
-                    f"📦 **{n}** words  ·  **{n_batch}** batch(es) of 10  ·  "
-                    f"~{n_batch * 5}–{n_batch * 8}s estimate"
-                )
+                st.info(f"📦 **{n}** kata  ·  **{n_batch}** batch  ·  ~{n_batch * 5}–{n_batch * 8}s")
 
                 if st.button("🚀 Generate Cards", type="primary", use_container_width=True):
                     vocab_list = selected[["vocab", "phrase"]].values.tolist()
                     notes = generate_cards(vocab_list, batch_size=10)
 
                     if notes:
-                        clean_name = deck_name.strip() or "Vocabulary"
-                        deck_id    = (
-                            int(hashlib.sha256(clean_name.encode()).hexdigest(), 16) % (1 << 30)
-                            + (1 << 29)
-                        )
-                        with st.spinner("📦 Packing .apkg…"):
-                            apkg_data = create_apkg(notes, clean_name, deck_id)
+                        csv_data = create_anki_csv(notes)
 
                         done_vocabs = {n["vocab"] for n in notes}
                         st.session_state.vocab_df.loc[
@@ -650,10 +484,10 @@ with tab_gen:
                         ] = "Done"
                         save_vocab(st.session_state.vocab_df)
 
-                        st.session_state.apkg_bytes    = apkg_data
+                        st.session_state.csv_bytes     = csv_data
                         st.session_state.preview_notes = notes
                         st.rerun()
                     else:
-                        st.error("❌ Generation failed. Check your Gemini API key and quota.")
+                        st.error("❌ Gagal generate. Cek Gemini API key dan quota.")
             else:
-                st.warning("Select at least one word.")
+                st.warning("Pilih minimal satu kata.")
