@@ -93,8 +93,7 @@ def get_gemini():
 gemini = get_gemini()
 
 # ─── AI Prompt ───────────────────────────────────────────────────────────────
-_PROMPT = """\
-Kamu adalah kamus dwibahasa Inggris-Indonesia. Untuk setiap item di bawah,
+_PROMPT = """Kamu adalah kamus dwibahasa Inggris-Indonesia. Untuk setiap item di bawah,
 kembalikan JSON array (urutan & jumlah sama dengan input).
 
 FORMAT OUTPUT:
@@ -103,17 +102,21 @@ FORMAT OUTPUT:
     "vocab": "sama seperti input",
     "part_of_speech": "Noun / Verb / Adjective / Adverb",
     "pronunciation_ipa": "/notasi IPA/",
-    "phrase_id": "Terjemahan kalimat 'phrase' ke Bahasa Indonesia. Jika phrase kosong, buat kalimat contoh singkat lalu terjemahkan."
+    "translation": "terjemahan vocab ke Bahasa Indonesia, 1-3 kata saja",
+    "phrase_en": "Jika phrase di input tidak kosong, salin SAMA PERSIS. Jika kosong, buat 1 kalimat Inggris pendek menggunakan vocab.",
+    "phrase_id": "Terjemahan phrase_en ke Bahasa Indonesia."
   }}
 ]
 
 ATURAN WAJIB:
-- phrase_id : terjemahan kalimat contoh ke Bahasa Indonesia, BUKAN terjemahan kata
-- Jika field phrase kosong, buatkan kalimat contoh sendiri lalu terjemahkan
+- translation : HANYA kata/frasa terjemahan vocab, bukan kalimat
+- phrase_en   : kalimat Inggris (salin dari input atau buat sendiri jika kosong)
+- phrase_id   : terjemahan phrase_en ke Bahasa Indonesia
 - Output HANYA array JSON, tanpa teks tambahan apapun
 
 INPUT:
 {batch}"""
+
 
 
 def _parse_json(text: str):
@@ -151,7 +154,9 @@ def generate_cards(vocab_phrase_list: list, batch_size: int = 10) -> list:
                 if isinstance(parsed, list) and parsed:
                     phrase_map = {item["vocab"]: item["phrase"] for item in batch_dicts}
                     for item in parsed:
-                        item["phrase"] = phrase_map.get(item.get("vocab", ""), "")
+                        original_phrase = phrase_map.get(item.get("vocab", ""), "")
+                        # Pakai phrase dari input jika ada, fallback ke phrase_en buatan Gemini
+                        item["phrase"] = original_phrase if original_phrase else item.get("phrase_en", "")
                     all_data.extend(parsed)
                     success = True
                     break
@@ -203,7 +208,13 @@ def build_back(note: dict) -> str:
     translation = note.get("translation", "").strip()
     phrase_id   = note.get("phrase_id", "").strip()
 
-    meta = f"{pos}. {ipa}" if pos and ipa else pos or ipa
+    # Bold POS, plain IPA
+    if pos and ipa:
+        meta = f"<b>{pos}</b>. {ipa}"
+    elif pos:
+        meta = f"<b>{pos}</b>"
+    else:
+        meta = ipa
 
     # Bold only the translation word(s) inside the Indonesian sentence
     if phrase_id and translation:
@@ -220,7 +231,7 @@ def build_back(note: dict) -> str:
     if meta:
         parts.append(meta)
     if phrase_id_html:
-        parts.append(f"<br>{phrase_id_html}")  # <br><br> = blank line gap
+        parts.append(f"<br>{phrase_id_html}")
 
     return "<br>".join(parts)
 
