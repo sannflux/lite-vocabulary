@@ -191,22 +191,36 @@ def _bold_vocab(phrase: str, vocab: str) -> str:
 def build_front(note: dict) -> str:
     vocab  = note.get("vocab", "").strip()
     phrase = note.get("phrase", "").strip()
-    return _bold_vocab(phrase, vocab) if phrase else f"<b>{vocab}</b>"
+    # Only bold the vocab word inside the sentence
+    if phrase:
+        return _bold_vocab(phrase, vocab)
+    return f"<b>{vocab}</b>"
 
 
 def build_back(note: dict) -> str:
-    vocab     = note.get("vocab", "").strip()
-    pos       = note.get("part_of_speech", "").strip()
-    ipa       = note.get("pronunciation_ipa", "").strip()
-    phrase_id = note.get("phrase_id", "").strip()
+    pos         = note.get("part_of_speech", "").strip()
+    ipa         = note.get("pronunciation_ipa", "").strip()
+    translation = note.get("translation", "").strip()
+    phrase_id   = note.get("phrase_id", "").strip()
 
     meta = f"{pos}. {ipa}" if pos and ipa else pos or ipa
 
-    parts = [f"<b>{vocab}</b>"]
+    # Bold only the translation word(s) inside the Indonesian sentence
+    if phrase_id and translation:
+        phrase_id_html = re.sub(
+            rf'(?i)\b({re.escape(translation)})\b',
+            r'<b>\1</b>',
+            phrase_id,
+            count=1,
+        )
+    else:
+        phrase_id_html = phrase_id
+
+    parts = []
     if meta:
         parts.append(meta)
-    if phrase_id:
-        parts.append(f"<br>{phrase_id}")
+    if phrase_id_html:
+        parts.append(f"<br>{phrase_id_html}")  # <br><br> = blank line gap
 
     return "<br>".join(parts)
 
