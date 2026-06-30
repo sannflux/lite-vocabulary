@@ -96,22 +96,27 @@ gemini = get_gemini()
 _PROMPT = """Kamu adalah kamus dwibahasa Inggris-Indonesia. Untuk setiap item di bawah,
 kembalikan JSON array (urutan & jumlah sama dengan input).
 
+KONTEKS PENTING:
+- Jika field "phrase" pada input TIDAK kosong, gunakan kalimat itu sebagai KONTEKS untuk menentukan arti vocab yang paling tepat (vocab bisa punya banyak arti, pilih yang sesuai konteks kalimat).
+- Jika field "phrase" pada input KOSONG, buat sendiri 1 kalimat Inggris pendek yang menunjukkan makna vocab dengan jelas.
+
 FORMAT OUTPUT:
 [
   {{
     "vocab": "sama seperti input",
     "part_of_speech": "Noun / Verb / Adjective / Adverb",
     "pronunciation_ipa": "/notasi IPA/",
-    "translation": "terjemahan vocab ke Bahasa Indonesia, 1-3 kata saja",
-    "phrase_en": "Jika phrase di input tidak kosong, salin SAMA PERSIS. Jika kosong, buat 1 kalimat Inggris pendek menggunakan vocab.",
-    "phrase_id": "Terjemahan phrase_en ke Bahasa Indonesia."
+    "translation": "terjemahan vocab ke Bahasa Indonesia (1-3 kata), sesuai konteks kalimat",
+    "phrase_en": "Salin SAMA PERSIS dari field phrase di input jika tidak kosong. Jika kosong, kalimat buatan sendiri.",
+    "phrase_id": "Terjemahan phrase_en ke Bahasa Indonesia. WAJIB gunakan PERSIS kata/frasa yang sama dengan nilai 'translation' di dalam kalimat ini, jangan diubah bentuknya (jangan ditambah imbuhan berbeda)."
   }}
 ]
 
 ATURAN WAJIB:
-- translation : HANYA kata/frasa terjemahan vocab, bukan kalimat
-- phrase_en   : kalimat Inggris (salin dari input atau buat sendiri jika kosong)
-- phrase_id   : terjemahan phrase_en ke Bahasa Indonesia
+- translation : HANYA kata/frasa terjemahan vocab (1-3 kata), bukan kalimat
+- phrase_en   : salin dari input jika ada, buat sendiri jika kosong
+- phrase_id   : terjemahan kalimat utuh, dan kata "translation" HARUS muncul verbatim (sama persis) di dalam phrase_id
+- JANGAN tambahkan tag HTML apapun (jangan pakai <b> atau tag lain) di phrase_id maupun translation
 - Output HANYA array JSON, tanpa teks tambahan apapun
 
 INPUT:
@@ -202,6 +207,41 @@ def build_front(note: dict) -> str:
     return f"<b>{vocab}</b>"
 
 
+def _bold_translation(phrase_id: str, translation: str) -> str:
+    """Bold the translation word(s) inside the Indonesian sentence.
+    Tries exact word-boundary match first, falls back to plain substring
+    match (case-insensitive) if word-boundary match fails (e.g. due to
+    Indonesian affixes)."""
+    if not phrase_id or not translation:
+        return phrase_id
+
+    # Strip any HTML the model might have added anyway
+    clean_phrase = re.sub(r"</?b>", "", phrase_id)
+    clean_translation = re.sub(r"</?b>", "", translation).strip()
+
+    # 1) Try exact word-boundary match
+    pattern = rf'(?i)\b({re.escape(clean_translation)})\b'
+    new_phrase, count = re.subn(pattern, r'<b>\1</b>', clean_phrase, count=1)
+    if count > 0:
+        return new_phrase
+
+    # 2) Fallback: plain case-insensitive substring match (no boundaries)
+    idx = clean_phrase.lower().find(clean_translation.lower())
+    if idx != -1:
+        end = idx + len(clean_translation)
+        return clean_phrase[:idx] + f"<b>{clean_phrase[idx:end]}</b>" + clean_phrase[end:]
+
+    # 3) Last resort: try bolding just the first word of translation
+    first_word = clean_translation.split()[0] if clean_translation.split() else ""
+    if first_word:
+        pattern2 = rf'(?i)\b({re.escape(first_word)})\b'
+        new_phrase, count = re.subn(pattern2, r'<b>\1</b>', clean_phrase, count=1)
+        if count > 0:
+            return new_phrase
+
+    return clean_phrase  # no match found, return unbolded
+
+
 def build_back(note: dict) -> str:
     pos         = note.get("part_of_speech", "").strip()
     ipa         = note.get("pronunciation_ipa", "").strip()
@@ -216,16 +256,7 @@ def build_back(note: dict) -> str:
     else:
         meta = ipa
 
-    # Bold only the translation word(s) inside the Indonesian sentence
-    if phrase_id and translation:
-        phrase_id_html = re.sub(
-            rf'(?i)\b({re.escape(translation)})\b',
-            r'<b>\1</b>',
-            phrase_id,
-            count=1,
-        )
-    else:
-        phrase_id_html = phrase_id
+    phrase_id_html = _bold_translation(phrase_id, translation)
 
     parts = []
     if meta:
