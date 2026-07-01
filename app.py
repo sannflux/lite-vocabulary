@@ -190,12 +190,17 @@ def generate_cards(vocab_phrase_list: list, batch_size: int = 10) -> list:
 
 # ─── Build HTML card sides ────────────────────────────────────────────────────
 def _bold_vocab(phrase: str, vocab: str) -> str:
-    """Wrap vocab word in phrase with <b> tag only, no style."""
-    return re.sub(
-        rf'(?i)\b({re.escape(vocab)})\b',
-        r'<b>\1</b>',
-        phrase,
-    )
+    """Wrap vocab word in phrase with <b> tag. Tries exact match first,
+    then falls back to prefix match to handle inflected forms (perish→perished)."""
+    # 1) Exact word-boundary match
+    result, count = re.subn(rf'(?i)\b({re.escape(vocab)})\b', r'<b>\1</b>', phrase, count=1)
+    if count:
+        return result
+    # 2) Prefix match: vocab as prefix of a longer word (perish → perished/perishes)
+    result, count = re.subn(rf'(?i)\b({re.escape(vocab)}\w*)', r'<b>\1</b>', phrase, count=1)
+    if count:
+        return result
+    return phrase
 
 
 def build_front(note: dict) -> str:
