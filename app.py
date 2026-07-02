@@ -107,7 +107,7 @@ FORMAT OUTPUT:
     "part_of_speech": "Noun / Verb / Adjective / Adverb",
     "pronunciation_ipa": "/notasi IPA/",
     "translation": "terjemahan vocab ke Bahasa Indonesia, 1-3 kata, sesuai konteks",
-    "phrase_en": "WAJIB DIISI. Salin SAMA PERSIS dari field phrase di input jika ada. Jika kosong, buat 1 kalimat Inggris pendek.",
+    "phrase_en": "WAJIB DIISI. Salin SAMA PERSIS dari field phrase di input jika ada. Jika kosong, buat 1 kalimat Inggris yang: (1) memberikan konteks situasi yang cukup sehingga pembaca bisa menebak arti vocab dari clue sekitarnya, (2) TIDAK menjelaskan arti vocab secara langsung, (3) gunakan kata-kata sederhana di luar vocab itu sendiri.",
     "phrase_id": "Terjemahan phrase_en ke Bahasa Indonesia yang natural.",
     "bold_word": "Tulis PERSIS kata atau frasa yang muncul di phrase_id yang merupakan terjemahan dari vocab. Contoh: jika vocab=disciples, phrase_id=Sang guru mengajarkan kebijaksanaan kepada murid-muridnya, maka bold_word=murid-muridnya"
   }}
