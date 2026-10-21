@@ -86,19 +86,27 @@ def save_vocab(df: pd.DataFrame):
 def get_gemini():
     genai.configure(api_key=GEMINI_API_KEY)
     return genai.GenerativeModel(
-        "gemini-2.5-flash-lite",
+        "gemini-3.1-flash-lite",
         generation_config={"response_mime_type": "application/json", "temperature": 0.1},
     )
 
 gemini = get_gemini()
 
 # ─── AI Prompt ───────────────────────────────────────────────────────────────
-_PROMPT = """Kamu adalah kamus dwibahasa Inggris-Indonesia. Untuk setiap item di bawah,
+_PROMPT = """Kamu adalah kamus dwibahasa Inggris-Indonesia untuk penutur asli Indonesia. Untuk setiap item di bawah,
 kembalikan JSON array (urutan & jumlah sama dengan input).
 
 KONTEKS PENTING:
 - Jika field "phrase" pada input TIDAK kosong, gunakan kalimat itu sebagai KONTEKS untuk menentukan arti vocab yang paling tepat.
 - Jika field "phrase" pada input KOSONG, WAJIB buat sendiri 1 kalimat Inggris pendek yang jelas menunjukkan makna vocab.
+
+GAYA TERJEMAHAN (SANGAT PENTING):
+- Gunakan kata yang UMUM dan akrab di telinga orang Indonesia sehari-hari, seperti yang dipakai di percakapan, berita, atau media populer.
+- HINDARI kata kuno, sastra, terlalu baku, atau jarang dipakai (contoh: "tatkala", "gerangan", "bersua", "dwiwarna", "jemala").
+- HINDARI terjemahan kata per kata (harfiah) yang terdengar kaku atau seperti hasil mesin.
+- Jika tidak ada padanan satu kata yang natural, pakai frasa pendek yang lazim diucapkan orang.
+- Kata serapan yang sudah umum boleh dipakai (contoh: "efektif", "kritis"), tetapi jangan membuat kata serapan yang terdengar asing.
+- Sebelum menjawab, tanyakan pada diri sendiri: "Apakah orang Indonesia biasa akan mengucapkan ini?" Jika tidak, ganti.
 
 FORMAT OUTPUT:
 [
@@ -106,12 +114,18 @@ FORMAT OUTPUT:
     "vocab": "sama seperti input",
     "part_of_speech": "Noun / Verb / Adjective / Adverb",
     "pronunciation_ipa": "/notasi IPA/",
-    "translation": "terjemahan vocab ke Bahasa Indonesia, 1-3 kata, sesuai konteks",
+    "translation": "terjemahan vocab ke Bahasa Indonesia, 1-3 kata, paling umum dipakai dan sesuai konteks",
     "phrase_en": "WAJIB DIISI. Salin SAMA PERSIS dari field phrase di input jika ada. Jika kosong, buat 1 kalimat Inggris yang: (1) memberikan konteks situasi yang cukup sehingga pembaca bisa menebak arti vocab dari clue sekitarnya, (2) TIDAK menjelaskan arti vocab secara langsung, (3) gunakan kata-kata sederhana di luar vocab itu sendiri.",
-    "phrase_id": "Terjemahan phrase_en ke Bahasa Indonesia yang natural.",
+    "phrase_id": "Terjemahan phrase_en ke Bahasa Indonesia yang NATURAL, seperti diucapkan penutur asli, bukan terjemahan harfiah. Gunakan kata yang sama dengan field translation.",
     "bold_word": "Tulis PERSIS kata atau frasa yang muncul di phrase_id yang merupakan terjemahan dari vocab. Contoh: jika vocab=disciples, phrase_id=Sang guru mengajarkan kebijaksanaan kepada murid-muridnya, maka bold_word=murid-muridnya"
   }}
 ]
+
+CONTOH TERJEMAHAN:
+- vocab=ephemeral → BURUK: "fana" / BAIK: "sementara", "hanya sebentar"
+- vocab=ubiquitous → BURUK: "serba hadir" / BAIK: "ada di mana-mana"
+- vocab=mundane → BURUK: "keduniawian" / BAIK: "biasa saja", "membosankan"
+- vocab=scrutinize → BURUK: "menelisik" / BAIK: "memeriksa dengan teliti"
 
 ATURAN WAJIB:
 - phrase_en  : WAJIB DIISI, tidak boleh kosong
