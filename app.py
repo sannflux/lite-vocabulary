@@ -116,10 +116,26 @@ FORMAT OUTPUT:
     "pronunciation_ipa": "/notasi IPA/",
     "translation": "terjemahan vocab ke Bahasa Indonesia, 1-3 kata, paling umum dipakai dan sesuai konteks",
     "phrase_en": "WAJIB DIISI. Salin SAMA PERSIS dari field phrase di input jika ada. Jika kosong, buat 1 kalimat Inggris yang: (1) memberikan konteks situasi yang cukup sehingga pembaca bisa menebak arti vocab dari clue sekitarnya, (2) TIDAK menjelaskan arti vocab secara langsung, (3) gunakan kata-kata sederhana di luar vocab itu sendiri.",
-    "phrase_id": "Terjemahan phrase_en ke Bahasa Indonesia yang NATURAL, seperti diucapkan penutur asli, bukan terjemahan harfiah. Gunakan kata yang sama dengan field translation.",
-    "bold_word": "Tulis PERSIS kata atau frasa yang muncul di phrase_id yang merupakan terjemahan dari vocab. Contoh: jika vocab=disciples, phrase_id=Sang guru mengajarkan kebijaksanaan kepada murid-muridnya, maka bold_word=murid-muridnya"
+    "phrase_id": "Terjemahan phrase_en ke Bahasa Indonesia yang NATURAL, seperti diucapkan penutur asli, bukan terjemahan harfiah. Gunakan kata yang sama dengan field translation. Bungkus terjemahan vocab dengan [[ ]] sesuai ATURAN PENANDA di bawah.",
+    "bold_word": "Salin PERSIS isi [[ ]] dari phrase_id, tanpa tanda baca."
   }}
 ]
+
+ATURAN PENANDA [[ ]] (SANGAT PENTING, bagian ini yang akan ditebalkan di kartu):
+- Di phrase_id, bungkus dengan [[ ]] HANYA kata/frasa Indonesia yang menerjemahkan vocab itu sendiri, yaitu yang sejajar dengan vocab di kalimat Inggris. Tepat SATU pasang [[ ]].
+- Kata Inggris lain yang BUKAN vocab (misalnya "a bit", "very", "so", "too", "not") TIDAK ikut dibungkus, walaupun terjemahannya menempel di sebelah vocab.
+- JANGAN masukkan tanda baca (. , ! ?) ke dalam [[ ]].
+- Jika kata yang sama muncul lebih dari sekali di phrase_id, taruh [[ ]] hanya pada kemunculan yang menerjemahkan vocab.
+- Contoh 1:
+  vocab=peckish
+  phrase_en=I only had a small breakfast, so I am feeling a bit peckish now.
+  phrase_id=Tadi sarapan saya cuma sedikit, jadi sekarang saya merasa sedikit [[lapar]].
+  bold_word=lapar
+- Contoh 2:
+  vocab=disciples
+  phrase_en=The master taught wisdom to his disciples.
+  phrase_id=Sang guru mengajarkan kebijaksanaan kepada [[murid-muridnya]].
+  bold_word=murid-muridnya
 
 CONTOH TERJEMAHAN:
 - vocab=ephemeral → BURUK: "fana" / BAIK: "sementara", "hanya sebentar"
@@ -128,8 +144,9 @@ CONTOH TERJEMAHAN:
 - vocab=scrutinize → BURUK: "menelisik" / BAIK: "memeriksa dengan teliti"
 
 ATURAN WAJIB:
-- phrase_en  : WAJIB DIISI, tidak boleh kosong
-- bold_word  : PERSIS substring yang ada di phrase_id (copy-paste dari phrase_id), bukan terjemahan bebas
+- phrase_en  : WAJIB DIISI, tidak boleh kosong, tanpa [[ ]]
+- phrase_id  : WAJIB mengandung tepat satu pasang [[ ]]
+- bold_word  : sama persis dengan isi [[ ]] di phrase_id
 - JANGAN tambahkan tag HTML apapun
 - Output HANYA array JSON, tanpa teks tambahan apapun
 
@@ -175,7 +192,7 @@ def generate_cards(vocab_phrase_list: list, batch_size: int = 10) -> list:
                     for item in parsed:
                         original_phrase = phrase_map.get(item.get("vocab", ""), "")
                         # Pakai phrase dari input jika ada, fallback ke phrase_en buatan Gemini
-                        item["phrase"] = original_phrase if original_phrase else item.get("phrase_en", "")
+                        item["phrase"] = original_phrase if original_phrase else _plain(item.get("phrase_en", ""))
                     all_data.extend(parsed)
                     success = True
                     break
@@ -203,6 +220,20 @@ def generate_cards(vocab_phrase_list: list, batch_size: int = 10) -> list:
 
 
 # ─── Build HTML card sides ────────────────────────────────────────────────────
+_MARK_RE = re.compile(r"\[\[(.+?)\]\]", re.DOTALL)   # [[kata]] dari Gemini
+_EDGE    = " \t\n.,;:!?\"'“”‘’()…—"                    # spasi & tanda baca: jangan ikut di-bold
+
+
+def _unmark(text: str) -> str:
+    """Hapus penanda [[ ]] (spasi di sekitarnya tetap)."""
+    return re.sub(r"\[\[|\]\]", "", text or "")
+
+
+def _plain(text: str) -> str:
+    """Teks polos: tanpa penanda [[ ]] dan tanpa tag <b>."""
+    return _unmark(re.sub(r"</?b>", "", text or "")).strip()
+
+
 def _bold_vocab(phrase: str, vocab: str) -> str:
     """Wrap vocab word in phrase with <b> tag. Tries exact match first,
     then falls back to prefix match to handle inflected forms (perish→perished)."""
@@ -226,25 +257,97 @@ def build_front(note: dict) -> str:
     return f"<b>{vocab}</b>"
 
 
-def _bold_translation(phrase_id: str, bold_word: str) -> str:
-    """Bold bold_word (exact substring from Gemini) inside phrase_id."""
-    if not phrase_id or not bold_word:
-        return phrase_id
-    clean_phrase = re.sub(r"</?b>", "", phrase_id)
-    clean_word   = re.sub(r"</?b>", "", bold_word).strip()
-    # Plain case-insensitive substring match (exact copy from phrase_id)
-    idx = clean_phrase.lower().find(clean_word.lower())
-    if idx != -1:
-        end = idx + len(clean_word)
-        return clean_phrase[:idx] + f"<b>{clean_phrase[idx:end]}</b>" + clean_phrase[end:]
-    return clean_phrase
+def _rel_pos(phrase: str, vocab: str):
+    """Posisi relatif (0..1) vocab di kalimat Inggris. Dipakai untuk memilih
+    kemunculan yang benar kalau sebuah kata muncul dua kali di kalimat Indonesia."""
+    phrase, vocab = (phrase or "").strip(), (vocab or "").strip()
+    if not phrase or not vocab:
+        return None
+    m = re.search(rf"(?i)\b{re.escape(vocab)}\w*", phrase)
+    return m.start() / len(phrase) if m else None
+
+
+def _bold_translation(phrase_id: str, bold_word: str = "", hint=None) -> str:
+    """Kalimat Indonesia (HTML) dengan terjemahan vocab dibungkus <b>.
+
+    1) Utama: Gemini menandai kata itu sendiri dengan [[ ]], jadi posisinya pasti
+       (tidak ada tebak-tebakan kalau kata yang sama muncul dua kali).
+    2) Cadangan (penanda tidak ada): cari bold_word sebagai KATA UTUH, tidak pernah
+       di tengah kata lain. Kalau muncul >1 kali, ambil yang paling dekat dengan posisi
+       vocab di kalimat Inggris (hint).
+    Tanda baca & spasi tidak pernah ikut di-bold. Kalau tidak ketemu: tanpa bold
+    (lebih baik tanpa bold daripada bold yang salah).
+    """
+    text = re.sub(r"</?b>", "", phrase_id or "").strip()
+    if not text:
+        return ""
+
+    # 1) [[ ]] marker
+    marks  = [m for m in _MARK_RE.finditer(text) if len(m.group(1).split()) <= 6]
+    bolded = False
+    if marks:
+        out, last = [], 0
+        for m in marks:
+            inner = m.group(1)
+            core  = inner.strip(_EDGE)
+            out.append(_unmark(text[last:m.start()]))
+            if core:
+                lead  = inner[: len(inner) - len(inner.lstrip(_EDGE))]
+                trail = inner[len(lead) + len(core):]
+                out.append(f"{lead}<b>{core}</b>{trail}")
+                bolded = True
+            else:
+                out.append(inner)
+            last = m.end()
+        out.append(_unmark(text[last:]))
+        if bolded:
+            return "".join(out)
+
+    # 2) Fallback: bold_word sebagai kata utuh
+    text = _unmark(text)
+    word = _plain(bold_word).strip(_EDGE)
+    if not word:
+        return text
+    esc  = re.escape(word)
+    hits = []
+    for pat in (rf"(?<!\w){esc}(?!\w)", rf"(?<!\w){esc}nya(?!\w)"):
+        hits = list(re.finditer(pat, text, flags=re.I))
+        if hits:
+            break
+    if not hits:
+        return text
+    best = hits[0]
+    if len(hits) > 1 and hint is not None:
+        best = min(hits, key=lambda h: abs(h.start() / len(text) - hint))
+    return f"{text[:best.start()]}<b>{best.group(0)}</b>{text[best.end():]}"
+
+
+def _back_sentence(note: dict) -> str:
+    """Kalimat Indonesia untuk sisi belakang kartu, dengan bold yang benar."""
+    return _bold_translation(
+        note.get("phrase_id", ""),
+        note.get("bold_word", ""),
+        _rel_pos(note.get("phrase", ""), note.get("vocab", "")),
+    )
+
+
+def _bold_missing(notes: list) -> list:
+    """Vocab yang kalimat Indonesia-nya TIDAK punya kata ter-bold sama sekali."""
+    return [
+        n.get("vocab", "?")
+        for n in notes
+        if n.get("phrase_id", "").strip() and "<b>" not in _back_sentence(n)
+    ]
+
+
+def _md(html: str) -> str:
+    """<b>x</b> → **x** untuk preview di st.markdown."""
+    return re.sub(r"</?b>", "**", html or "")
 
 
 def build_back(note: dict) -> str:
-    pos       = note.get("part_of_speech", "").strip()
-    ipa       = note.get("pronunciation_ipa", "").strip()
-    phrase_id = note.get("phrase_id", "").strip()
-    bold_word = note.get("bold_word", "").strip()
+    pos = note.get("part_of_speech", "").strip()
+    ipa = note.get("pronunciation_ipa", "").strip()
 
     if pos and ipa:
         meta = f"<b>{pos}</b>. {ipa}"
@@ -253,7 +356,7 @@ def build_back(note: dict) -> str:
     else:
         meta = ipa
 
-    phrase_id_html = _bold_translation(phrase_id, bold_word)
+    phrase_id_html = _back_sentence(note)
 
     parts = []
     if meta:
@@ -449,17 +552,21 @@ with tab_gen:
 
         st.caption("Import di Anki: **File → Import** → pilih file ini → separator = **Tab**, centang **Allow HTML**")
 
+        # Kartu yang kata terjemahannya gagal di-bold → beri tahu, jangan diam-diam salah
+        missing = _bold_missing(st.session_state.preview_notes)
+        if missing:
+            st.warning("⚠️ Bold terjemahan tidak ketemu untuk: " + ", ".join(missing))
+
         if st.session_state.preview_notes:
             with st.expander("👁️ Preview kartu (5 pertama)", expanded=True):
                 for note in st.session_state.preview_notes[:5]:
-                    vocab     = note.get("vocab", "?")
-                    phrase    = note.get("phrase", "")
-                    pos       = note.get("part_of_speech", "")
-                    ipa       = note.get("pronunciation_ipa", "")
-                    phrase_id = note.get("phrase_id", "—")
+                    pos   = note.get("part_of_speech", "")
+                    ipa   = note.get("pronunciation_ipa", "")
+                    front = _md(build_front(note))
+                    back  = _md(_back_sentence(note)) or "—"
 
-                    st.markdown(f"**Front:** {phrase or vocab}")
-                    st.markdown(f"**Back:** *(kalimat sama)* → `{pos}` {ipa}  \n🇮🇩 _{phrase_id}_")
+                    st.markdown(f"**Front:** {front}")
+                    st.markdown(f"**Back:** *(kalimat sama)* → `{pos}` {ipa}  \n🇮🇩 {back}")
                     st.divider()
 
         if st.button("🔄 Generate lagi", use_container_width=True):
